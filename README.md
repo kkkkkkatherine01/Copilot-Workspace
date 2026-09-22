@@ -125,7 +125,7 @@ cp .env.example .env.local     # 默认 VITE_API_BASE_URL=http://localhost:8000 
 npm run dev
 ```
 
-打开 http://localhost:5173，后端需要保持在 8000 端口运行。
+打开 `http://localhost:5173`，后端需要保持在 8000 端口运行。
 
 ### 验证检索准确率
 
