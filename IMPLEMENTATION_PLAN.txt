@@ -1,0 +1,413 @@
+# 客服 Copilot 工作台 — 实施计划
+
+本计划遵循 copilot_spec.txt 确定的架构（FastAPI 后端 + React 前端，embedding 模型
+shibing624/text2vec-base-chinese）。顺序原则：先把"检索→生成→人工确认→反馈闭环"
+这条核心链路完整跑通（阶段 0-5），再做加分项和收尾文档（阶段 6-11）。每一步都标注了
+依赖的前置步骤、涉及文件、核心接口/数据结构、测试方式和预期结果，不满足预期就停下来
+排查，不进入下一步。
+
+================================================================
+阶段 0：环境搭建（无业务逻辑，纯脚手架）
+================================================================
+依赖：无
+
+涉及文件（新增）：
+- backend/requirements.txt
+- backend/.env（本地填 ANTHROPIC_API_KEY，不提交）
+- backend/.gitignore（排除 .env、__pycache__、*.db、venv）
+- backend/data/faq.json（已有，从项目根目录移过去）
+- backend/data/test_conversations.json（已有，从 5.txt 抄出来，从项目根目录移过去）
+- frontend/（用 `npm create vite@latest frontend -- --template react` 生成骨架）
+
+requirements.txt 内容：
+  fastapi
+  uvicorn[standard]
+  anthropic
+  sentence-transformers
+  numpy
+  python-dotenv
+  （torch 单独处理：pip install torch --index-url https://download.pytorch.org/whl/cpu，
+    避免默认装 GPU 版导致体积过大）
+
+测试方式：
+- `pip install -r requirements.txt` 能装完不报错
+- `python -c "import fastapi, anthropic, sentence_transformers, numpy"` 无报错
+- `cd frontend && npm install && npm run dev` 能跑起 Vite 默认页面
+
+预期结果：环境干净可用，为后续阶段扫清障碍。这一步不涉及任何业务代码，出问题基本是
+依赖版本冲突，网络问题（sentence-transformers 首次会从 HuggingFace 下载模型权重，
+需要确认网络能连通，如果连不上 HuggingFace 需要提前配置镜像源，这是本阶段唯一的
+真实风险点，需要先验证一次模型能下载成功）。
+
+================================================================
+阶段 1：检索模块（核心链路第一环）
+================================================================
+依赖：阶段 0（环境 + 数据文件就位）
+
+涉及文件（新增）：
+- backend/retrieval.py
+- backend/eval.py
+
+核心接口设计（retrieval.py）：
+  load_faqs(path: str) -> list[dict]
+      读取 faq.json，返回原始 FAQ 列表
+
+  class FaqIndex:
+      __init__(self, faqs: list[dict], model_name="shibing624/text2vec-base-chinese")
+          加载 embedding 模型，对每条 FAQ 编码并缓存为 numpy 矩阵（N x dim）
+          编码文本 = question + " " + " ".join(keywords)（把 keywords 拼进去增强语义信号，
+          只编码 question 而不编码 answer，因为用户消息在语义上更接近"问题"而不是"答案"）
+      retrieve(self, user_message: str, top_k=3) -> list[dict]
+          返回 [{id, category, question, answer, score}, ...] 按 score 降序，score 为
+          cosine similarity（0~1）
+
+  说明：FaqIndex 在进程内只初始化一次（阶段3会用 FastAPI 的 startup 事件持有单例），
+  这里先作为可独立运行、可单独测试的模块。
+
+eval.py 核心逻辑：
+  加载 test_conversations.json 的 5 条数据，对每条取第一条 user 消息跑 FaqIndex.retrieve，
+  取 top-1 的 id 和 expected_faq_id 比较，统计命中率，逐条打印，最后打印总准确率。
+
+测试方式：
+  `python eval.py`
+
+预期输出（示例格式）：
+  conv_001 [easy]   expected=faq_001  top1=faq_001  score=0.83  HIT
+  conv_002 [easy]   expected=faq_002  top1=faq_002  score=0.79  HIT
+  conv_003 [medium] expected=faq_003  top1=faq_003  score=0.61  HIT
+  conv_004 [medium] expected=faq_004  top1=faq_004  score=0.68  HIT
+  conv_005 [hard]   expected=faq_005  top1=faq_005  score=0.55  HIT
+  Accuracy: 5/5 (100%)
+
+  验收标准：easy 难度的 2 条必须命中（这是最基本的语义匹配，命中不了说明模型或编码
+  策略有问题，需要停下来排查，比如检查模型是否真的下载成功、是否误用了英文模型）。
+  medium/hard 命中不了可以接受，但要记录下来留给阶段9"Bad Case分析"用，不need
+  为了强行提高分数去过拟合这5条测试数据（比如手动加同义词表），那样没有意义。
+
+  如果整体准确率明显偏低（比如 <60%），在这一步就要停下来调整，可选手段：
+  1. 检查编码文本是否包含了 keywords（增强信号）
+  2. 尝试把 answer 也纳入编码文本一起加权
+  3. 确认 shibing624/text2vec-base-chinese 是否正确加载（打印模型输出维度做 sanity check）
+  不要跳过这一步直接进入生成模块——检索是地基，检索不准生成模块测试出来的问题会
+  互相干扰，无法定位到底是检索错了还是 prompt 写得不好。
+
+================================================================
+阶段 2：生成模块（核心链路第二环）
+================================================================
+依赖：阶段 1（需要 FaqIndex.retrieve 的输出作为输入）
+
+涉及文件（新增）：
+- backend/generation.py
+
+核心接口设计：
+  PROMPT_TEMPLATE_V1（模块内常量，字符串模板）：
+    系统角色设定 + 约束（只能基于给定FAQ回答/不能编造/必须标注引用的faq_id），
+    然后把 top-3 FAQ 的 id/question/answer 和用户消息拼进去。
+
+  generate_suggestion(user_message: str, retrieved_faqs: list[dict],
+                       confidence_threshold: float = 0.5) -> dict
+      返回 {suggestion: str, referenced_faq_ids: list[str], low_confidence: bool}
+
+      设计决策（会在 PROMPT_ITERATION.md 里写明理由）：
+      如果 retrieved_faqs 为空，或最高分 < confidence_threshold，直接短路返回固定文案
+      "未找到明确匹配的知识条目，建议人工核实"，不调用 Claude API。
+      理由：置信度已经很低时，让 LLM 自由发挥反而增加编造风险，不如用确定性代码兜底，
+      这也更省 token。这是"LLM 只管生成、不擅自决策"这条核心原则的一个体现——
+      置信度判断这个"是否该生成"的决策交给确定性代码，不交给 LLM 自己判断。
+
+      confidence >= threshold 时才真正调用 Anthropic API
+      （model="claude-haiku-4-5-20251001"，从 backend/.env 读取 ANTHROPIC_API_KEY）
+
+  引用 faq_id 的提取：要求 Claude 按约定格式输出（比如在回复末尾附
+  "[参考: faq_001, faq_003]"），generation.py 用正则把这段解析出来存进
+  referenced_faq_ids，并从展示给用户的最终文本里去掉这个标记（用户不需要看到这种
+  内部标记，前端知识溯源展示用的是 retrieved_faqs 里的原文卡片，不是这个标记本身）。
+
+测试方式：
+  临时脚本或 generation.py 的 `if __name__ == "__main__":` 块，对 test_conversations.json
+  的 5 条消息，先跑 retrieval 拿 top-3，再跑 generate_suggestion，打印结果人工检查：
+  1. 生成内容是否只包含 FAQ 原文里出现过的信息（人工比对，看有没有编造细节，
+     比如编造了 FAQ 里没写的具体天数、金额）
+  2. referenced_faq_ids 是否解析正确、和 retrieval 给的 top-3 id 一致
+  3. 故意构造一个低置信度输入（比如问一个跟电商客服完全无关的问题，
+     "今天天气怎么样"）验证走的是短路逻辑而不是调用 API
+
+预期结果：
+  5 条正常测试消息都生成了合理、不编造、能追溯到具体 FAQ id 的回复；
+  1 条无关问题测试消息直接返回固定提示，没有产生 API 调用（可以在代码里加个
+  print 确认是否进了短路分支，方便肉眼验证）。
+
+================================================================
+阶段 3：后端 API 层（把检索+生成接起来，暴露给前端）
+================================================================
+依赖：阶段 1 + 阶段 2（main.py 直接调用 FaqIndex 和 generate_suggestion）
+
+涉及文件（新增）：
+- backend/db.py
+- backend/models.py
+- backend/main.py
+
+核心数据结构（models.py，Pydantic）：
+  class FaqHit(BaseModel): id, category, question, answer, score
+  class SuggestRequest(BaseModel): conversation_id: str, user_message: str
+  class SuggestResponse(BaseModel):
+      message_id: str, suggestion: str, retrieved_faqs: list[FaqHit],
+      confidence: float, low_confidence: bool
+  class FeedbackRequest(BaseModel):
+      conversation_id: str, message_id: str, user_message: str,
+      retrieved_faq_ids: list[str], confidence_score: float,
+      suggestion: str, final_reply: str, action: Literal["采纳","编辑","忽略"]
+  class FeedbackResponse(BaseModel): success: bool
+
+db.py：
+  DB_PATH = os.environ.get("DB_PATH", "./feedback.db")  —— 本地默认当前目录，
+      生产环境（Railway）通过环境变量指向挂载的 Persistent Volume 路径（比如
+      /data/feedback.db），不要硬编码路径，这是为阶段11部署时数据持久化做的预留
+  init_db() —— 建表（若不存在），feedback_log 表结构见 spec 6.3
+  insert_feedback(record: FeedbackRequest) —— 写入一行，timestamp 用当前时间
+
+main.py：
+  应用启动时（startup event）：加载 faq.json，构建一次 FaqIndex 单例，init_db()
+  CORS：允许 http://localhost:5173 和部署后的 Vercel 域名（先留占位，阶段11回填）
+
+  GET  /api/conversations              -> 返回 test_conversations.json 的
+                                           [{conversation_id, first_message, difficulty}]
+  GET  /api/conversations/{id}         -> 返回该会话完整 messages
+  POST /api/suggest                    -> 调 FaqIndex.retrieve + generate_suggestion，
+                                           组装 SuggestResponse，message_id 用
+                                           f"{conversation_id}_{当前消息序号}"生成
+  POST /api/feedback                   -> db.insert_feedback，返回 {success: true}
+
+测试方式：
+  `uvicorn main:app --reload`，用 FastAPI 自带的 /docs（Swagger UI）手动测试四个端点：
+  1. GET /api/conversations 返回 5 条会话摘要
+  2. GET /api/conversations/conv_001 返回完整 messages
+  3. POST /api/suggest 传 conv_001 的用户消息，返回结构完整的 JSON
+     （对比阶段1、2跑出来的结果应该一致）
+  4. POST /api/feedback 传一条构造好的反馈，返回 success:true
+  然后用 `sqlite3 feedback.db "select * from feedback_log;"` 确认这行数据真的写进去了，
+  字段值和请求体一致
+
+预期结果：4 个端点行为符合预期，SQLite 里能查到刚才写入的反馈记录，字段无缺失/无类型错误。
+这一步测试通过后，后端就是完整可用的，可以脱离前端单独验收核心链路（这也是为什么放在
+前端之前——前后端分离架构下，后端先自证正确性能大幅减少后续前端联调时的排查成本）。
+
+================================================================
+阶段 4：前端只读联调（先跑通"选会话→看到建议"，不做按钮交互）
+================================================================
+依赖：阶段 3（后端 API 已可用并正在本地运行）
+
+涉及文件（新增）：
+- frontend/src/api.js —— 封装 fetch 调用，读取 import.meta.env.VITE_API_BASE_URL
+- frontend/src/App.jsx —— 整体布局：左右两栏
+- frontend/src/components/ConversationPanel.jsx —— 会话下拉框 + 消息展示（只读）
+- frontend/.env.local（VITE_API_BASE_URL=http://localhost:8000，不提交，
+  .env.example 提交一份占位）
+
+流程：下拉框加载 GET /api/conversations 列表 -> 选中一个 -> 展示该会话的用户消息
+-> 自动（或点一个"生成建议"按钮）调 POST /api/suggest -> 右侧先用最简单的方式
+（一段纯文本）把 suggestion 打印出来，不做编辑框和按钮
+
+测试方式：
+  `npm run dev`，浏览器里手动过一遍 5 条测试会话，检查网络面板（Network tab）
+  里 /api/suggest 请求返回的数据和页面上显示的内容是否一致，检查跨域是否报错
+
+预期结果：5 条会话都能在浏览器里选中并看到对应的 Copilot 建议文本，无 CORS 报错，
+无 500 错误。这一步的目的是先确认前后端能通信、数据格式对得上，再引入交互逻辑，
+避免"UI 逻辑 bug"和"接口联调 bug"混在一起排查。
+
+================================================================
+阶段 5：前端交互完善（编辑/采纳/忽略 + 反馈闭环）—— 核心链路收尾
+================================================================
+依赖：阶段 4
+
+涉及文件（修改）：
+- frontend/src/components/SuggestionPanel.jsx（新增：可编辑 textarea +
+  知识溯源卡片 + 置信度标签 + 三个按钮）
+- frontend/src/components/ConversationPanel.jsx（新增：把"最终发送内容"追加到
+  消息流里，模拟客服真的回复了用户）
+- frontend/src/App.jsx（管理当前会话的 state：已发送消息列表、当前建议、
+  message_id 等）
+
+三个按钮行为：
+  采纳       -> final_reply = suggestion（原样），action="采纳"
+  编辑后发送 -> final_reply = textarea 当前内容（如果和原始 suggestion 不同），action="编辑"
+  忽略       -> 不追加到对话流，final_reply 留空或等于 suggestion（仅用于记录），action="忽略"
+  三种情况都要 POST /api/feedback
+
+测试方式：
+  对 5 条测试会话分别至少测试一次三种操作中的一种，覆盖全部三种操作类型，
+  然后查 SQLite：
+  `sqlite3 backend/feedback.db "select conversation_id, action, final_reply from feedback_log;"`
+
+预期结果：
+  - action="采纳" 的行，final_reply 和 suggestion 完全一致
+  - action="编辑" 的行，final_reply 是修改后的文本，和原始 suggestion 不同
+  - action="忽略" 的行，前端页面上左侧对话流没有出现新的客服回复
+  - 每次操作后页面有明确反馈（比如按钮短暂显示"已发送"），不会让客服不知道点击生效没有
+
+  走到这里，5.txt 里"必须完成"的 5 条核心需求全部打通并可演示，核心链路阶段结束。
+
+================================================================
+阶段 6：知识溯源 + 置信度展示打磨（加分项，优先级最高）
+================================================================
+依赖：阶段 5（数据字段其实阶段3就都返回了，这一步主要是前端展示打磨）
+
+涉及文件（修改）：
+- frontend/src/components/SuggestionPanel.jsx（FAQ 原文卡片样式、
+  低置信度醒目提示样式，比如红色/黄色 banner）
+
+测试方式：
+  构造一个跟现有 FAQ 都不太匹配的问题（比如"你们支持花呗分期吗"，faq.json 里没有
+  这一条），手动调用前端，检查是否触发"低置信度，建议人工核实"的醒目提示；
+  再测一个正常问题，检查知识溯源卡片是否正确展示对应 FAQ 原文
+
+预期结果：低置信度和正常置信度两种情况在 UI 上有肉眼可辨的区别，知识溯源卡片
+内容和后端返回的 retrieved_faqs 一致。
+
+================================================================
+阶段 7：Prompt 版本管理与 A/B 对比（加分项）
+================================================================
+依赖：阶段 2（generation.py 已跑通，现在要加第二版 prompt 做对比）
+
+涉及文件（修改/新增）：
+- backend/generation.py（新增 PROMPT_TEMPLATE_V2，generate_suggestion 增加
+  prompt_version 参数，默认用效果更好的那版）
+- PROMPT_ITERATION.md（新增文档）
+
+V1 -> V2 的迭代方向（具体以实测效果为准，预期方向）：
+  V1：较简单直接的指令，可能出现引用格式不稳定、偶尔啰嗦、语气不够贴近客服话术
+  V2：补充更明确的输出格式要求（引用标记的位置和格式）、限定回复长度、
+      补充客服话术风格要求（比如"用您好开头，语气友好简洁"）
+
+测试方式：
+  挑 2-3 个有代表性的 case（建议用阶段1 eval.py 里 medium/hard 难度的，
+  更容易看出差异），分别用 V1 和 V2 跑一遍 generate_suggestion，把两版原始输出
+  都记录到 PROMPT_ITERATION.md 里做对比
+
+预期结果：PROMPT_ITERATION.md 里有至少 2 版 prompt 的完整文本 + 至少 2-3 个
+case 的并排对比（用户消息 / V1输出 / V2输出 / 差异说明），能看出 V2 相对 V1
+的具体改进点，不是空泛地说"更好"。
+
+================================================================
+阶段 8：多轮上下文感知（加分项，优先级最低，时间不够可跳过）
+================================================================
+依赖：阶段 5（前端已经能维护对话 state）
+
+涉及文件（修改）：
+- backend/models.py（SuggestRequest 新增可选字段 history: list[dict]）
+- backend/generation.py（prompt 组装时如果 history 非空，把历史对话也拼进去）
+- frontend/src/App.jsx（调用 /api/suggest 时把当前已发送的消息历史一起传过去）
+
+测试方式：
+  由于 test_conversations.json 都是单轮，需要手动在前端模拟一个两轮对话
+  （比如先问"怎么退款"，客服发送后，再追问"大概要等几天"），检查第二轮生成的
+  建议是否理解了"退款"这个上下文，而不是把"几天"当成孤立问题去检索（孤立检索
+  "大概要等几天"很可能检索不到任何相关FAQ或检索错）
+
+预期结果：第二轮回复能正确关联到退款场景，说明上下文确实被传递并生效。
+如果时间不够，这一步可以直接跳过，不影响核心交付。
+
+================================================================
+阶段 9：Bad Case 分析（加分项，依赖前面的真实测试数据）
+================================================================
+依赖：阶段 1 的 eval.py 结果 + 阶段 7 的 prompt 对比测试中发现的问题案例
+
+涉及文件（新增）：
+- BAD_CASE_ANALYSIS.md
+
+内容要求：挑至少 2 个效果不好的真实 case（优先从 eval.py 里没命中的 medium/hard
+case，或阶段7对比中 V1 表现差的 case 里选），每个 case 写清楚：
+  1. 用户原始消息
+  2. 实际检索到的 FAQ（top-3）和期望的 FAQ
+  3. 实际生成的回复
+  4. 问题出在哪（检索没找对？还是找对了但生成没引用好？）
+  5. 可能的改进方向（比如优化编码文本、调整 prompt、增加 FAQ 关键词覆盖）
+
+测试方式：N/A（分析文档），但要基于真实跑出来的输出写，不能编。
+
+预期结果：2 个以上有具体输入输出、有诊断、有改进建议的真实 case 分析。
+
+================================================================
+阶段 10：README 与 AI_USAGE.md（收尾文档）
+================================================================
+依赖：前面所有阶段完成，功能和结构已经稳定
+
+涉及文件（新增）：
+- README.md：项目背景、架构图（文字版数据流即可）、启动方式
+  （backend 和 frontend 分别怎么起）、技术选型理由
+  （为什么 FastAPI+React 而不是 Streamlit、为什么用 text2vec-base-chinese、
+  为什么用 numpy 暴力检索而不是向量数据库、为什么对话历史不落库）
+- AI_USAGE.md：记录本项目开发过程中 AI（Claude Code）参与的部分和人工决策的部分
+
+测试方式：按 README 里写的步骤，从零（新开一个终端，不依赖当前已装好的环境
+残留状态）走一遍启动流程，确认步骤描述准确无遗漏
+
+预期结果：任何人照着 README 操作都能在本地跑起来完整 demo。
+
+================================================================
+阶段 11：部署
+================================================================
+依赖：阶段 10（README 里已经写了部署步骤草稿，这一步是真的执行）
+
+部署平台确定为：**后端 Railway（不用 Render）+ 前端 Vercel**。原因：Render 免费层是
+ephemeral filesystem，服务休眠/重启会清空 SQLite 文件，导致反馈日志在评审时被清空；
+Railway 免费 Trial（1GB RAM、无自动休眠）没有这个问题。已知限制：Railway 免费 Trial
+是 30天/$5 额度，用完后降级，只保证"1天完成+评审窗口内可访问"这个场景，不是长期
+生产方案，需要在 README 里写清楚。
+
+涉及文件（新增/修改）：
+- backend/Procfile 或 railway.json（Railway 的启动命令配置，
+  比如 `uvicorn main:app --host 0.0.0.0 --port $PORT`）
+- Railway 项目里挂载一个 Persistent Volume（比如挂到 /data），设置环境变量
+  `DB_PATH=/data/feedback.db` 和 `ANTHROPIC_API_KEY`
+- frontend 的 Vercel 项目环境变量配置（VITE_API_BASE_URL 指向 Railway 分配的后端地址）
+- backend/main.py 的 CORS 白名单补上 Vercel 分配的域名
+- README.md 补充最终的可访问链接 + Railway Trial 期限的已知限制说明
+
+测试方式：
+1. 部署完成后，用一个完全没参与开发的浏览器/隐私窗口打开 Vercel 链接，
+   走一遍完整核心链路（选会话->看建议->编辑/采纳/忽略->查看反馈是否生效），
+   不依赖本地环境
+2. 专门验证数据持久化：提交一条反馈后，在 Railway 后台手动重启一次服务
+   （模拟休眠/重新部署场景），重启后再查一次 /api 或直接看 Volume 里的
+   feedback.db，确认刚才写入的数据还在——这一步是本次修正要解决的核心问题，
+   必须验证通过，不能假设"部署上去就没事"
+
+预期结果：公网链接可访问，核心链路在生产环境下行为和本地一致，无 CORS 报错，
+无 500 错误，且服务重启后反馈日志数据不丢失。
+
+------------------------------------------------------------
+阶段 11.5：录屏保险（应对中国大陆网络访问不确定性）
+------------------------------------------------------------
+依赖：阶段 11 部署完成且验证通过
+
+原因：Vercel/Railway 是国外基础设施，无法保证在中国大陆网络环境下一定能直接打开
+（GFW 策略不透明、会变化，且 Vercel 的 `*.vercel.app` 域名历史上就有访问不稳定的
+记录）。如果评审人所在网络打不开部署链接，需要有另一份证明功能确实做出来了。
+
+涉及文件（新增）：
+- demo_recording.gif 或 demo_recording.mp4（放在项目根目录或 README 里嵌入链接）
+
+内容要求：完整录一遍核心链路——选一个测试会话 -> 看到生成的建议 + 知识溯源卡片 +
+置信度标签 -> 分别演示一次"采纳"和"编辑后发送"（如果时间够，也录一次"忽略"）->
+左侧对话流出现最终回复 -> （可选）打开 SQLite 或加一个简单的调试页面展示
+feedback_log 确实写入了这条记录
+
+测试方式：自己完整看一遍录屏，确认画面能看清文字、操作步骤连贯、体现了知识溯源和
+置信度这两个加分项
+
+预期结果：即使部署链接在某些网络环境下打不开，README 里的录屏也能独立证明
+核心链路和加分项都已实现。
+
+================================================================
+总体验收清单（对照 5.txt 原始要求）
+================================================================
+[ ] 阶段0-5完成 = 5条"必须完成"的核心需求全部打通并可在部署环境演示
+[ ] 阶段6 = 知识溯源 + 置信度展示（加分项，已计划）
+[ ] 阶段7 = Prompt版本管理与A/B对比，PROMPT_ITERATION.md（必须交付物）
+[ ] 阶段8 = 多轮上下文（加分项，可选）
+[ ] 阶段9 = Bad Case分析，BAD_CASE_ANALYSIS.md（加分项，已计划做）
+[ ] 阶段10 = README + AI_USAGE.md（必须交付物）
+[ ] 阶段11 = 部署链接（必须交付物）
+[ ] eval.py 的准确率报告（阶段1产出，写入README或单独章节）

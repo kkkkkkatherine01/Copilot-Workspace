@@ -1,0 +1,47 @@
+[
+  {
+    "conversation_id": "conv_001",
+    "messages": [
+      { "role": "user", "content": "我买的东西到了，但是屏幕碎了，怎么处理？" },
+      { "role": "assistant", "content": "" }
+    ],
+    "expected_faq_id": "faq_001",
+    "difficulty": "easy"
+  },
+  {
+    "conversation_id": "conv_002",
+    "messages": [
+      { "role": "user", "content": "我昨天下的单，怎么还没发货啊？都等了一天了" },
+      { "role": "assistant", "content": "" }
+    ],
+    "expected_faq_id": "faq_002",
+    "difficulty": "easy"
+  },
+  {
+    "conversation_id": "conv_003",
+    "messages": [
+      { "role": "user", "content": "我有个满200减30的券，买了一个180的东西能用吗？" },
+      { "role": "assistant", "content": "" }
+    ],
+    "expected_faq_id": "faq_003",
+    "difficulty": "medium"
+  },
+  {
+    "conversation_id": "conv_004",
+    "messages": [
+      { "role": "user", "content": "我换了手机号，现在登不上去了，密码也忘了" },
+      { "role": "assistant", "content": "" }
+    ],
+    "expected_faq_id": "faq_004",
+    "difficulty": "medium"
+  },
+  {
+    "conversation_id": "conv_005",
+    "messages": [
+      { "role": "user", "content": "付了三次都失败了，钱也没扣，到底怎么回事？" },
+      { "role": "assistant", "content": "" }
+    ],
+    "expected_faq_id": "faq_005",
+    "difficulty": "hard"
+  }
+]

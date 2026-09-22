@@ -1,0 +1,163 @@
+# 客服 Copilot 工作台
+
+电商平台客服辅助系统：客服与用户对话时，系统从 FAQ 知识库中检索相关内容，调用 Claude 生成回复建议；
+客服可以采纳、编辑后发送、或忽略这条建议，处理结果记录到反馈日志，形成"生成 → 人工确认 → 留痕"的闭环。
+
+核心设计原则：**LLM 只负责生成建议，不直接执行任何影响用户的动作**。采纳/编辑/发送必须经客服确认才生效，
+每一次人工决策都会被记录，不存在"LLM 自动回复用户"的路径。
+
+## 目录
+
+- [系统架构](#系统架构)
+- [技术选型理由](#技术选型理由)
+- [项目结构](#项目结构)
+- [启动方式](#启动方式)
+- [核心功能对照](#核心功能对照)
+- [知识溯源与置信度](#知识溯源与置信度)
+- [检索准确率报告](#检索准确率报告eval-py)
+- [已知限制](#已知限制)
+- [部署](#部署)
+
+## 系统架构
+
+```
+用户消息（前端输入框，或从测试场景加载）
+   │  POST /api/suggest { conversation_id, user_message, history }
+   ▼
+检索模块 retrieval.py
+   将用户消息编码为向量（本地模型 shibing624/text2vec-base-chinese），
+   与 30 条 FAQ 的预计算向量做 cosine similarity，取 top-3
+   ▼
+生成模块 generation.py
+   把「用户消息 + 历史对话（如有）+ top-3 FAQ」组装进 prompt，调用 Claude Haiku
+   - 只能基于检索到的 FAQ 内容作答，不能编造
+   - 必须标注引用的 FAQ id（用于前端知识溯源展示）
+   - 置信度低于阈值(0.5)时不调用 LLM，直接返回固定的"建议人工核实"文案
+   ▼
+后端 main.py 返回 { suggestion, retrieved_faqs, referenced_faq_ids, confidence, low_confidence }
+   ▼
+前端展示：左侧对话流 + 右侧建议面板（可编辑文本框 / 知识溯源卡片 / 置信度标签 / 三个操作按钮）
+   ▼
+客服点击 采纳 / 编辑后发送 / 忽略
+   │  POST /api/feedback
+   ▼
+写入 SQLite feedback_log（记录 action、最终发送内容、检索到的FAQ、置信度等）
+```
+
+## 技术选型理由
+
+| 选型 | 原因 |
+|---|---|
+| **FastAPI + React 前后端分离** | 原始 Spec 最初定的是 Streamlit，后确认题目要求"含前后端"，改为真正的前后端分离架构：FastAPI 提供纯业务逻辑的 REST API，React 负责交互界面，职责边界更清楚 |
+| **embedding 用 `shibing624/text2vec-base-chinese`** | FAQ 和用户消息都是中文，sentence-transformers 官方的 `all-MiniLM-L6-v2` 主要面向英文语料，对中文语义的区分度差；换成中文专门优化的模型后 `eval.py` 的检索命中率有实质提升 |
+| **检索用 numpy 暴力计算 cosine similarity，不引入向量数据库** | FAQ 只有 30 条，暴力计算对这个数据量级没有性能问题，引入 FAISS 等向量库是不必要的复杂度 |
+| **生成用 Claude Haiku** | Haiku 延迟低、成本低，适合这种"检索约束下的短回复生成"场景 |
+| **反馈日志用 SQLite，对话历史不落库** | 反馈日志（`feedback_log`）需要持久化留痕，用 SQLite 足够；对话历史目前只在前端 state 里维护，属于 demo 场景下的合理取舍——刷新页面清空是可接受的，避免为了持久化对话记录再引入一张表和相应的读写逻辑 |
+| **后端部署 Railway（不用 Render）** | Render 免费层是 ephemeral filesystem，服务休眠/重启会清空 SQLite 文件，直接导致反馈日志在评审时被清空；Railway 免费 Trial（1GB RAM、无自动休眠）没有这个问题，见[已知限制](#已知限制) |
+
+## 项目结构
+
+```
+backend/
+  data/
+    faq.json                 # 30条FAQ知识库
+    test_conversations.json  # 5条测试对话，用于demo演示和eval.py验证
+  retrieval.py                # 向量检索：FaqIndex 类，embedding编码 + cosine相似度 + top-k
+  generation.py                # 生成：prompt组装（V1/V2两版）、调用Claude API、引用解析
+  db.py                         # SQLite反馈日志读写
+  models.py                     # FastAPI请求/响应的Pydantic模型
+  main.py                       # FastAPI应用、路由、CORS
+  eval.py                       # 用test_conversations.json验证检索准确率
+  requirements.txt
+frontend/
+  src/
+    App.jsx                     # 主布局与状态管理
+    components/
+      ConversationPanel.jsx     # 左侧：对话流 + 输入框 + 加载测试场景
+      SuggestionPanel.jsx       # 右侧：建议文本框 + 知识溯源 + 置信度 + 操作按钮
+    api.js                       # 封装对后端API的调用
+IMPLEMENTATION_PLAN.txt          # 分阶段实施计划（含每步的测试方式和预期结果）
+PROMPT_ITERATION.md              # Prompt V1/V2 对比记录
+BAD_CASE_ANALYSIS.md             # 2个真实bad case分析
+```
+
+## 启动方式
+
+### 后端
+
+```bash
+cd backend
+python -m venv venv
+venv\Scripts\activate          # Windows；Mac/Linux 用 source venv/bin/activate
+
+# 先单独装CPU版torch，避免默认拉取体积过大的GPU版
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+
+cp .env.example .env           # 然后把 ANTHROPIC_API_KEY 填进 .env
+uvicorn main:app --reload --port 8000
+```
+
+首次启动会从 HuggingFace 下载 embedding 模型权重（约几百MB），需要能访问 huggingface.co。
+
+### 前端
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local     # 默认 VITE_API_BASE_URL=http://localhost:8000 即可本地联调
+npm run dev
+```
+
+打开 http://localhost:5173，后端需要保持在 8000 端口运行。
+
+### 验证检索准确率
+
+```bash
+cd backend
+python eval.py
+```
+
+## 知识溯源与置信度
+
+- **知识溯源**：`/api/suggest` 返回 `retrieved_faqs`（检索到的 top-3 FAQ 原文）和 `referenced_faq_ids`
+  （生成阶段实际引用了哪几条，从 Claude 输出末尾的 `[参考: faq_001, ...]` 标记解析得到），前端在FAQ卡片上
+  标出"已引用"，方便客服核对建议依据。
+- **置信度**：用检索到的最高 cosine similarity 分数表示，前端映射成 高(≥70%)/中(≥50%)/低(<50%) 三档，
+  低于 0.5 时后端直接不调用 LLM，返回固定的"建议人工核实"文案（见 `generation.py` 里的短路逻辑）。
+
+## 检索准确率报告（eval.py）
+
+```
+conv_001   [easy  ] expected=faq_001  top1=faq_001  score=0.581  HIT
+conv_002   [easy  ] expected=faq_002  top1=faq_002  score=0.649  HIT
+conv_003   [medium] expected=faq_003  top1=faq_013  score=0.599  MISS
+conv_004   [medium] expected=faq_004  top1=faq_004  score=0.788  HIT
+conv_005   [hard  ] expected=faq_005  top1=faq_005  score=0.637  HIT
+
+Accuracy: 4/5 (80%)
+```
+
+conv_003 的 miss 属于三条语义高度相似的优惠券FAQ互相"抢答"，正确答案排第3（分数只差0.01~0.05）；
+生成阶段因为拿到的是 top-3 而不是只有 top-1，实际最终回复引用的是正确的 faq_003。详细分析见
+[BAD_CASE_ANALYSIS.md](BAD_CASE_ANALYSIS.md)。
+
+## 已知限制
+
+1. **检索不感知对话历史**：多轮追问（比如"这张券还能用吗"）里的指代消解只在生成阶段靠历史兜底，
+   检索阶段仍然只用当前这一句做匹配，可能检索不到最相关的FAQ（生成阶段通常能靠历史纠正回来，
+   但不保证每次都行）。见 `BAD_CASE_ANALYSIS.md` Case 2。
+2. **对话历史不持久化**：只在前端 state 维护，刷新页面会丢失（反馈日志本身是持久化的，不受影响）。
+3. **Railway 免费 Trial 有时间限制**：30天/$5额度用完后会降级，不是永久免费方案，仅覆盖"评审窗口内可访问"
+   这个场景，长期使用需要升级付费或换成 Render + 独立免费 Postgres 的组合。
+4. **中国大陆网络访问不保证**：Vercel/Railway 是国外基础设施，无法保证国内网络环境下稳定直连，
+   已额外准备录屏作为部署链接之外的备用证明。
+
+## 部署
+
+> 部署完成后回填实际访问链接。
+
+- 后端部署到 Railway，挂载 Persistent Volume 存放 SQLite 文件（环境变量 `DB_PATH` 指向卷路径），
+  环境变量配置 `ANTHROPIC_API_KEY`
+- 前端部署到 Vercel，环境变量 `VITE_API_BASE_URL` 指向 Railway 分配的后端地址
+- 部署步骤和验证方式详见 `IMPLEMENTATION_PLAN.txt` 阶段11
