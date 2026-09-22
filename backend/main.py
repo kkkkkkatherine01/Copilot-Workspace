@@ -6,9 +6,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import db
-from generation import generate_suggestion
+from generation import generate_suggestion, rewrite_query_with_history
 from models import FeedbackRequest, FeedbackResponse, SuggestRequest, SuggestResponse
-from retrieval import FaqIndex, load_faqs
+from retrieval import FaqIndex, load_faqs, looks_context_dependent
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
@@ -69,7 +69,15 @@ def get_conversation(conversation_id: str):
 @app.post("/api/suggest", response_model=SuggestResponse)
 def suggest(req: SuggestRequest):
     faq_index: FaqIndex = _state["faq_index"]
-    retrieved = faq_index.retrieve(req.user_message, top_k=3)
+
+    # 检索本身不感知历史，但对"这张券还能用吗"这类依赖上下文的追问，
+    # 先用历史把它改写成一句独立的问题再检索，效果比直接拿原句检索好得多（见 BAD_CASE_ANALYSIS.md）。
+    # 只在看起来像有指代/省略的时候才触发，避免给每条消息都多付一次LLM调用成本。
+    retrieval_query = req.user_message
+    if looks_context_dependent(req.user_message, has_history=bool(req.history)):
+        retrieval_query = rewrite_query_with_history(req.user_message, req.history)
+
+    retrieved = faq_index.retrieve(retrieval_query, top_k=3)
     result = generate_suggestion(req.user_message, retrieved, history=req.history)
 
     _message_counters[req.conversation_id] = _message_counters.get(req.conversation_id, 0) + 1

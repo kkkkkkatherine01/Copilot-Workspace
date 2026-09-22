@@ -56,6 +56,38 @@ PROMPT_TEMPLATE_V2 = """你是电商平台的客服助手，为人工客服生�
 PROMPT_TEMPLATES = {"v1": PROMPT_TEMPLATE_V1, "v2": PROMPT_TEMPLATE_V2}
 DEFAULT_PROMPT_VERSION = "v2"  # 实测效果更好（见 PROMPT_ITERATION.md），设为默认
 
+# 检索阶段本身不感知历史（见 BAD_CASE_ANALYSIS.md Case 2）。
+# 对于"这张券还能用吗"这类依赖上下文才能理解的追问，先用这个prompt把它改写成一句
+# 独立、语义完整的问题，再拿改写后的句子去做向量检索，检索效果会明显更好。
+# 只在 retrieval.looks_context_dependent 判断命中时才触发，避免给每条消息都多付一次调用成本。
+QUERY_REWRITE_PROMPT = """以下是客服对话历史和用户最新的一句话。请把用户最新的话改写成一句独立、
+语义完整、不需要依赖上下文就能理解的问题，用于知识库检索。只输出改写后的问题本身，
+不要输出任何解释、标点符号以外的多余内容。
+
+对话历史：
+{history_text}
+
+用户最新的话：{user_message}
+
+改写后的问题："""
+
+
+def rewrite_query_with_history(user_message: str, history: list[dict]) -> str:
+    role_label = {"user": "用户", "assistant": "客服"}
+    history_text = "\n".join(
+        f"{role_label.get(m['role'], m['role'])}：{m['content']}" for m in history
+    )
+    prompt = QUERY_REWRITE_PROMPT.format(history_text=history_text, user_message=user_message)
+
+    client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    response = client.messages.create(
+        model=MODEL_NAME,
+        max_tokens=100,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    rewritten = response.content[0].text.strip()
+    return rewritten or user_message  # 万一改写结果是空的，兜底用原始消息
+
 
 def _build_faq_context(retrieved_faqs: list[dict]) -> str:
     lines = []

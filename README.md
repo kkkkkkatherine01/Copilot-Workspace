@@ -23,8 +23,12 @@
 用户消息（前端输入框，或从测试场景加载）
    │  POST /api/suggest { conversation_id, user_message, history }
    ▼
+若消息看起来依赖上下文（短句/含"这""那"等指代词，且有历史）：
+   先用 generation.rewrite_query_with_history() 把它改写成独立完整的问题（仅用于检索，
+   不影响后面生成阶段看到的原始用户消息）
+   ▼
 检索模块 retrieval.py
-   将用户消息编码为向量（本地模型 shibing624/text2vec-base-chinese），
+   将（改写后或原始的）消息编码为向量（本地模型 shibing624/text2vec-base-chinese），
    与 30 条 FAQ 的预计算向量做 cosine similarity，取 top-3
    ▼
 生成模块 generation.py
@@ -128,8 +132,7 @@ pytest tests/ -v
 ```
 
 测的是 `generation.py` 的引用解析、低置信度短路逻辑，以及 `retrieval.py` 的编码策略，
-都是纯逻辑测试，用 mock 替换了 Anthropic 客户端，不会产生真实 API 调用和费用，
-也不需要加载 embedding 模型，几秒钟跑完。检索的端到端准确率由 `eval.py` 覆盖，
+都是纯逻辑测试，用 mock 替换了 Anthropic 客户端。检索的端到端准确率由 `eval.py` 覆盖，
 不适合放进单元测试里（要加载真实模型、跑起来慢）。
 
 ## 知识溯源与置信度
@@ -158,14 +161,14 @@ conv_003 的 miss 属于三条语义高度相似的优惠券FAQ互相"抢答"，
 
 ## 已知限制
 
-1. **检索不感知对话历史**：多轮追问（比如"这张券还能用吗"）里的指代消解只在生成阶段靠历史兜底，
-   检索阶段仍然只用当前这一句做匹配，可能检索不到最相关的FAQ（生成阶段通常能靠历史纠正回来，
-   但不保证每次都行）。见 `BAD_CASE_ANALYSIS.md` Case 2。
+1. **检索的历史感知是启发式触发的，不是每次都做**：`retrieval.looks_context_dependent()` 判断
+   消息是否短/含指代词，命中才会先用 `generation.rewrite_query_with_history()` 把消息改写成
+   独立完整的问题再检索，未命中的消息（大多数单轮场景）不受影响、不多花调用成本。实测能把原本
+   检索不到的FAQ稳定拉进top-3，但改写效果依赖LLM输出，不保证100%命中最优排序。见
+   `BAD_CASE_ANALYSIS.md` Case 2。
 2. **对话历史不持久化**：只在前端 state 维护，刷新页面会丢失（反馈日志本身是持久化的，不受影响）。
 3. **Railway 免费 Trial 有时间限制**：30天/$5额度用完后会降级，不是永久免费方案，仅覆盖"评审窗口内可访问"
    这个场景，长期使用需要升级付费或换成 Render + 独立免费 Postgres 的组合。
-4. **中国大陆网络访问不保证**：Vercel/Railway 是国外基础设施，无法保证国内网络环境下稳定直连，
-   已额外准备录屏作为部署链接之外的备用证明。
 
 ## 部署
 

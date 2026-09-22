@@ -23,6 +23,22 @@ def _faq_to_text(faq: dict) -> str:
     return keywords_text + " " + keywords_text + " " + faq["question"]
 
 
+# 常见的中文指代/省略主语标记，命中就认为这句话脱离上下文可能语义不完整，
+# 检索前值得先做一次query改写（见 generation.rewrite_query_with_history）。
+# 这是一个粗糙的启发式，宁可多改写几次（成本很低），也不要漏掉真正有指代的case。
+_CONTEXT_DEPENDENT_MARKERS = ("这", "那", "它", "此", "上面", "刚才", "之前")
+# 注意：不要加"该"——"应该"这种极常见的词会把它误判成有指代，反而增加不必要的改写调用
+_SHORT_MESSAGE_THRESHOLD = 12
+
+
+def looks_context_dependent(message: str, has_history: bool) -> bool:
+    if not has_history:
+        return False
+    if len(message) <= _SHORT_MESSAGE_THRESHOLD:
+        return True
+    return any(marker in message for marker in _CONTEXT_DEPENDENT_MARKERS)
+
+
 class FaqIndex:
     """FAQ 向量索引，进程内只应初始化一次（FastAPI 里作为单例持有）。"""
 

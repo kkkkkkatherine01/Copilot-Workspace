@@ -11,6 +11,7 @@ from generation import (
     _build_history_section,
     _parse_citation,
     generate_suggestion,
+    rewrite_query_with_history,
 )
 
 
@@ -91,3 +92,28 @@ def test_generate_suggestion_calls_api_when_confidence_sufficient():
         assert result["suggestion"] == "回复内容"
         assert result["referenced_faq_ids"] == ["faq_001"]
         mock_client.messages.create.assert_called_once()
+
+
+def test_rewrite_query_with_history_returns_stripped_text():
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(text="  改写后的独立问题  ")]
+
+    with patch("generation.Anthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create.return_value = fake_response
+
+        history = [{"role": "user", "content": "第一轮问题"}]
+        result = rewrite_query_with_history("这个还能用吗", history)
+
+        assert result == "改写后的独立问题"
+        mock_client.messages.create.assert_called_once()
+
+
+def test_rewrite_query_with_history_falls_back_to_original_when_empty():
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(text="   ")]
+
+    with patch("generation.Anthropic") as mock_anthropic_cls:
+        mock_anthropic_cls.return_value.messages.create.return_value = fake_response
+        result = rewrite_query_with_history("原始问题", [{"role": "user", "content": "历史"}])
+        assert result == "原始问题"
