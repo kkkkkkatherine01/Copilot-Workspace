@@ -91,10 +91,3 @@ def suggest(req: SuggestRequest):
 def feedback(req: FeedbackRequest):
     db.insert_feedback(req)
     return FeedbackResponse(success=True)
-
-
-@app.get("/api/debug/feedback")
-def debug_feedback():
-    # 临时调试接口：验证 Railway Persistent Volume 上的 SQLite 数据在服务重启后是否还在，
-    # 验证完毕后会删除，不是正式对外的API
-    return db.get_all_feedback()

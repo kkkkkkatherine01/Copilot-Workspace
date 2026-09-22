@@ -154,9 +154,10 @@ conv_003 的 miss 属于三条语义高度相似的优惠券FAQ互相"抢答"，
 
 ## 部署
 
-> 部署完成后回填实际访问链接。
-
-- 后端部署到 Railway，挂载 Persistent Volume 存放 SQLite 文件（环境变量 `DB_PATH` 指向卷路径），
-  环境变量配置 `ANTHROPIC_API_KEY`
-- 前端部署到 Vercel，环境变量 `VITE_API_BASE_URL` 指向 Railway 分配的后端地址
-- 部署步骤和验证方式详见 `IMPLEMENTATION_PLAN.txt` 阶段11
+- **可交互 Demo**：https://copilot-workspace-xi.vercel.app
+- 后端：https://copilot-workspace-production.up.railway.app （Railway，Root Directory 设为 `backend`，
+  挂载 Persistent Volume 到 `/data` 存放 SQLite 文件，`DB_PATH=/data/feedback.db`）
+- 前端：Vercel，Root Directory 设为 `frontend`，环境变量 `VITE_API_BASE_URL` 指向上面的 Railway 地址
+- 后端 CORS 白名单通过环境变量 `FRONTEND_ORIGIN` 加上了 Vercel 的域名
+- **持久化已实测验证**：写入一条反馈记录后手动重启 Railway 服务，重启后数据仍在（用临时调试接口验证过，
+  验证完已移除，不是正式对外的API）
