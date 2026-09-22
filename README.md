@@ -155,7 +155,7 @@ conv_003 的 miss 属于三条语义高度相似的优惠券FAQ互相"抢答"，
 ## 部署
 
 - **可交互 Demo**：https://copilot-workspace-xi.vercel.app
-- 后端：https://copilot-workspace-production.up.railway.app （Railway，Root Directory 设为 `backend`，
+- 后端：https://copilot-workspace-production.up.railway.app 
   挂载 Persistent Volume 到 `/data` 存放 SQLite 文件，`DB_PATH=/data/feedback.db`）
 - 前端：Vercel，Root Directory 设为 `frontend`，环境变量 `VITE_API_BASE_URL` 指向上面的 Railway 地址
 - 后端 CORS 白名单通过环境变量 `FRONTEND_ORIGIN` 加上了 Vercel 的域名
