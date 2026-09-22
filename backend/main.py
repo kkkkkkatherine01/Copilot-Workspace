@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import db
-from generation import generate_suggestion, rewrite_query_with_history
+from generation import DEFAULT_CONFIDENCE_THRESHOLD, generate_suggestion, rewrite_query_with_history
 from models import FeedbackRequest, FeedbackResponse, SuggestRequest, SuggestResponse
 from retrieval import FaqIndex, load_faqs, looks_context_dependent
 
@@ -18,6 +18,21 @@ _state: dict = {}
 # 每个 conversation_id 生成过多少条建议，用来拼 message_id（f"{conversation_id}_{序号}"）。
 # 单进程内存计数，重启会归零，对 demo 场景可以接受（不影响功能，只影响 message_id 的连续性）。
 _message_counters: dict[str, int] = {}
+
+
+def _compute_display_confidence(retrieved_faqs: list[dict], referenced_faq_ids: list[str]) -> float:
+    """展示给客服的匹配度，对应实际被引用的FAQ分数，而不是永远显示检索top-1的分数。
+    否则会出现"匹配度显示60%，但被引用的是另一条55%的FAQ"这种看起来矛盾的情况
+    （检索排序和生成阶段最终选谁是两个独立判断，见 BAD_CASE_ANALYSIS.md Case 1）。
+    如果引用了多条，取分数最高的一条；如果没有任何FAQ被引用（低置信度短路、
+    API异常、或LLM没标注引用），没有"被引用的FAQ"可参考，退回显示检索top-1的分数。
+    """
+    if not retrieved_faqs:
+        return 0.0
+    cited_scores = [f["score"] for f in retrieved_faqs if f["id"] in referenced_faq_ids]
+    if cited_scores:
+        return max(cited_scores)
+    return retrieved_faqs[0]["score"]
 
 
 @asynccontextmanager
@@ -83,7 +98,10 @@ def suggest(req: SuggestRequest):
     _message_counters[req.conversation_id] = _message_counters.get(req.conversation_id, 0) + 1
     message_id = f"{req.conversation_id}_{_message_counters[req.conversation_id]}"
 
-    confidence = retrieved[0]["score"] if retrieved else 0.0
+    confidence = _compute_display_confidence(retrieved, result["referenced_faq_ids"])
+    # 只要生成阶段本身判定为低置信度（检索太弱没调用LLM、或API调用失败），
+    # 就一定展示警示，不管这里重新计算出的分数是多少
+    low_confidence = result["low_confidence"] or confidence < DEFAULT_CONFIDENCE_THRESHOLD
 
     return SuggestResponse(
         message_id=message_id,
@@ -91,7 +109,7 @@ def suggest(req: SuggestRequest):
         retrieved_faqs=retrieved,
         referenced_faq_ids=result["referenced_faq_ids"],
         confidence=confidence,
-        low_confidence=result["low_confidence"],
+        low_confidence=low_confidence,
     )
 
 
