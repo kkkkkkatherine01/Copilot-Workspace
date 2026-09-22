@@ -75,7 +75,7 @@ backend/
   models.py                     # FastAPI请求/响应的Pydantic模型
   main.py                       # FastAPI应用、路由、CORS
   eval.py                       # 用test_conversations.json验证检索准确率
-  tests/                         # pytest单元测试（引用解析、低置信度短路、编码策略）
+  tests/                         # pytest单元测试（引用解析、低置信度短路、编码策略、匹配度对齐）
   requirements.txt
   requirements-dev.txt           # 额外含pytest，仅本地/CI测试用
 frontend/
@@ -87,6 +87,7 @@ frontend/
     api.js                       # 封装对后端API的调用
 PROMPT_ITERATION.md              # Prompt V1/V2 对比记录
 BAD_CASE_ANALYSIS.md             # 2个真实bad case分析
+DEMO_LINK.txt                     # Demo/源码链接，供压缩包提交时在根目录直接看到
 ```
 
 ## FAQ 数据说明
@@ -141,9 +142,9 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
-测的是 `generation.py` 的引用解析、低置信度短路逻辑，以及 `retrieval.py` 的编码策略，
-都是纯逻辑测试，用 mock 替换了 Anthropic 客户端，不产生真实API调用。检索的端到端准确率由
-`eval.py` 覆盖。
+测的是 `generation.py` 的引用解析、低置信度短路逻辑、`retrieval.py` 的编码策略，以及
+`main.py` 的匹配度展示对齐逻辑，都是纯逻辑测试，用 mock 替换了 Anthropic 客户端，不产生
+真实API调用。检索的端到端准确率由 `eval.py` 覆盖。
 
 ## 知识溯源与FAQ匹配度
 

@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# 本地开发 + 部署后的 Vercel 域名（阶段11部署时回填真实域名）
+# 本地开发 + 部署后的 Vercel 域名（通过 FRONTEND_ORIGIN 环境变量配置，不硬编码）
 ALLOWED_ORIGINS = [
     "http://localhost:5173",
 ]
