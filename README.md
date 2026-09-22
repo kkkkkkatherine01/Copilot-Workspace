@@ -1,5 +1,8 @@
 # 客服 Copilot 工作台
 
+> **可交互 Demo**：https://copilot-workspace-xi.vercel.app
+> **完整源码（GitHub）**：https://github.com/kkkkkkatherine01/Copilot-Workspace
+
 电商平台客服辅助系统：客服与用户对话时，系统从 FAQ 知识库中检索相关内容，调用 Claude 生成回复建议；
 客服可以采纳、编辑后发送、或忽略这条建议，处理结果记录到反馈日志，形成"生成 → 人工确认 → 留痕"的闭环。
 
