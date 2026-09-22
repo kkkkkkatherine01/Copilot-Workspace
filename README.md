@@ -67,7 +67,9 @@ backend/
   models.py                     # FastAPI请求/响应的Pydantic模型
   main.py                       # FastAPI应用、路由、CORS
   eval.py                       # 用test_conversations.json验证检索准确率
+  tests/                         # pytest单元测试（引用解析、低置信度短路、编码策略）
   requirements.txt
+  requirements-dev.txt           # 额外含pytest，仅本地/CI测试用
 frontend/
   src/
     App.jsx                     # 主布局与状态管理
@@ -116,6 +118,19 @@ npm run dev
 cd backend
 python eval.py
 ```
+
+### 运行单元测试
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+测的是 `generation.py` 的引用解析、低置信度短路逻辑，以及 `retrieval.py` 的编码策略，
+都是纯逻辑测试，用 mock 替换了 Anthropic 客户端，不会产生真实 API 调用和费用，
+也不需要加载 embedding 模型，几秒钟跑完。检索的端到端准确率由 `eval.py` 覆盖，
+不适合放进单元测试里（要加载真实模型、跑起来慢）。
 
 ## 知识溯源与置信度
 
