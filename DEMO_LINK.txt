@@ -1,0 +1,10 @@
+客服 Copilot 工作台 — 交付链接
+
+可交互 Demo： https://copilot-workspace-xi.vercel.app
+完整源码（GitHub）： https://github.com/kkkkkkatherine01/Copilot-Workspace
+
+启动方式、架构说明、技术选型理由、Prompt迭代记录（PROMPT_ITERATION.md）、
+Bad Case分析（BAD_CASE_ANALYSIS.md）等详见 README.md。
+
+注意：Demo 部署在 Vercel + Railway（国外基础设施），不保证在所有网络环境下都能稳定直连。
+如果链接打不开，请告知我，我可以另外提供功能演示的截图或录屏。
