@@ -6,6 +6,7 @@
 from unittest.mock import MagicMock, patch
 
 from generation import (
+    GENERATION_ERROR_FALLBACK,
     LOW_CONFIDENCE_FALLBACK,
     _build_faq_context,
     _build_history_section,
@@ -29,12 +30,13 @@ def test_parse_citation_filters_ids_not_in_valid_set():
     assert ids == ["faq_001"]
 
 
-def test_parse_citation_missing_marker_falls_back_to_all_valid_ids():
-    # LLM 没按格式输出引用标记时的兜底行为
+def test_parse_citation_missing_marker_returns_no_citations():
+    # LLM 没按格式输出引用标记时：不知道具体引用了哪条，宁可不声称引用，
+    # 也不能把全部检索结果都标成"已引用"制造虚假的知识溯源信息（这是修复过的一个真实bug）
     raw = "没有按格式输出引用标记的回复"
     text, ids = _parse_citation(raw, valid_ids={"faq_001", "faq_002"})
     assert text == raw
-    assert set(ids) == {"faq_001", "faq_002"}
+    assert ids == []
 
 
 def test_build_history_section_empty_when_no_history():
@@ -117,3 +119,24 @@ def test_rewrite_query_with_history_falls_back_to_original_when_empty():
         mock_anthropic_cls.return_value.messages.create.return_value = fake_response
         result = rewrite_query_with_history("原始问题", [{"role": "user", "content": "历史"}])
         assert result == "原始问题"
+
+
+def test_rewrite_query_with_history_falls_back_to_original_on_api_error():
+    # 查询改写不是核心链路，API调用失败（网络/限流等）不该让整个请求崩掉，
+    # 应该退回原始消息去检索
+    with patch("generation.Anthropic") as mock_anthropic_cls:
+        mock_anthropic_cls.return_value.messages.create.side_effect = Exception("network error")
+        result = rewrite_query_with_history("原始问题", [{"role": "user", "content": "历史"}])
+        assert result == "原始问题"
+
+
+def test_generate_suggestion_returns_error_fallback_on_api_failure():
+    with patch("generation.Anthropic") as mock_anthropic_cls:
+        mock_anthropic_cls.return_value.messages.create.side_effect = Exception("rate limited")
+
+        retrieved = [{"id": "faq_001", "question": "Q", "answer": "A", "score": 0.9}]
+        result = generate_suggestion("消息", retrieved, confidence_threshold=0.5)
+
+        assert result["suggestion"] == GENERATION_ERROR_FALLBACK
+        assert result["low_confidence"] is True
+        assert result["referenced_faq_ids"] == []

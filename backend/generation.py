@@ -10,6 +10,7 @@ load_dotenv()
 MODEL_NAME = "claude-haiku-4-5-20251001"
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 LOW_CONFIDENCE_FALLBACK = "未找到明确匹配的知识条目，建议人工核实后再回复用户。"
+GENERATION_ERROR_FALLBACK = "生成建议时出现异常（可能是网络或API问题），请客服人工处理这条消息。"
 
 # [参考: faq_001, faq_003] 这种格式，用于从 LLM 输出里解析引用的 FAQ id
 _CITATION_PATTERN = re.compile(r"\[参考[:：]\s*([^\]]+)\]")
@@ -79,14 +80,19 @@ def rewrite_query_with_history(user_message: str, history: list[dict]) -> str:
     )
     prompt = QUERY_REWRITE_PROMPT.format(history_text=history_text, user_message=user_message)
 
-    client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-    response = client.messages.create(
-        model=MODEL_NAME,
-        max_tokens=100,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    rewritten = response.content[0].text.strip()
-    return rewritten or user_message  # 万一改写结果是空的，兜底用原始消息
+    try:
+        client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        response = client.messages.create(
+            model=MODEL_NAME,
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        rewritten = response.content[0].text.strip()
+        return rewritten or user_message  # 万一改写结果是空的，兜底用原始消息
+    except Exception:
+        # 查询改写只是检索前的优化手段，不是核心链路，失败了就退回用原始消息去检索，
+        # 不能因为这一步（非必需）出错就让整个 /api/suggest 请求 500
+        return user_message
 
 
 def _build_faq_context(retrieved_faqs: list[dict]) -> str:
@@ -111,9 +117,10 @@ def _build_history_section(history: list[dict] | None) -> str:
 def _parse_citation(raw_text: str, valid_ids: set[str]) -> tuple[str, list[str]]:
     match = _CITATION_PATTERN.search(raw_text)
     if not match:
-        # LLM 没按格式输出引用标记，兜底返回全部检索到的 FAQ id，
-        # 同时不删除任何文本（没有标记可删）
-        return raw_text.strip(), list(valid_ids)
+        # LLM 没按格式输出引用标记：不知道它具体参考了哪一条，
+        # 宁可不声称引用（返回空列表），也不要把全部检索结果都标成"已引用"，
+        # 否则前端"已引用"标签会展示虚假的知识溯源信息
+        return raw_text.strip(), []
 
     cited_ids = [x.strip() for x in match.group(1).split(",") if x.strip() in valid_ids]
     clean_text = raw_text[: match.start()].strip()
@@ -146,12 +153,22 @@ def generate_suggestion(
         user_message=user_message,
     )
 
-    client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-    response = client.messages.create(
-        model=MODEL_NAME,
-        max_tokens=500,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        response = client.messages.create(
+            model=MODEL_NAME,
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception:
+        # Claude API 调用失败（网络、限流等）时不能让请求直接500，
+        # 用明确的错误提示兜底，客服能看出这是系统问题而不是"没有匹配的知识"
+        return {
+            "suggestion": GENERATION_ERROR_FALLBACK,
+            "referenced_faq_ids": [],
+            "low_confidence": True,
+        }
+
     raw_text = response.content[0].text
     suggestion, referenced_faq_ids = _parse_citation(raw_text, valid_ids)
 

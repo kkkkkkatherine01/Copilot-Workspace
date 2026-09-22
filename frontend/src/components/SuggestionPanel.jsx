@@ -1,20 +1,23 @@
-function confidenceLabel(score) {
+// 这个分数是检索时的 cosine similarity，不是校准过的"预测正确概率"，
+// 命名和展示上统一用"匹配度"而不是"置信度"，避免暗示一个我们没有做过的统计校准。
+// 详见 README「知识溯源与FAQ匹配度」一节的说明。
+function matchScoreLabel(score) {
   if (score >= 0.7) return { text: '高', className: 'confidence-high' }
   if (score >= 0.5) return { text: '中', className: 'confidence-medium' }
   return { text: '低', className: 'confidence-low' }
 }
 
 function SuggestionPanel({ loading, suggestion, editedText, onEditedTextChange, onAccept, onEdit, onIgnore, actionTaken, submitting }) {
-  const confidence = suggestion ? confidenceLabel(suggestion.confidence) : null
+  const matchScore = suggestion ? matchScoreLabel(suggestion.confidence) : null
   const isEdited = suggestion && editedText !== suggestion.suggestion
 
   return (
     <div className="panel suggestion-panel">
       <div className="panel-header">
         <h2>Copilot 建议</h2>
-        {confidence && !loading && (
-          <span className={`confidence-badge ${confidence.className}`}>
-            置信度：{confidence.text}（{(suggestion.confidence * 100).toFixed(0)}%）
+        {matchScore && !loading && (
+          <span className={`confidence-badge ${matchScore.className}`}>
+            FAQ匹配度：{matchScore.text}（{(suggestion.confidence * 100).toFixed(0)}%）
           </span>
         )}
       </div>
@@ -27,7 +30,7 @@ function SuggestionPanel({ loading, suggestion, editedText, onEditedTextChange, 
         {!loading && suggestion && (
           <>
             {suggestion.low_confidence && (
-              <div className="low-confidence-banner">⚠️ 低置信度，请谨慎核实后再发送</div>
+              <div className="low-confidence-banner">⚠️ FAQ匹配度较低，请谨慎核实后再发送</div>
             )}
 
             <textarea
