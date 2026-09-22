@@ -32,6 +32,14 @@ def init_db() -> None:
     conn.close()
 
 
+def get_all_feedback() -> list[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM feedback_log ORDER BY id").fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 def insert_feedback(record: FeedbackRequest) -> None:
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
