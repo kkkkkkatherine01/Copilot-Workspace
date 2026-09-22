@@ -81,7 +81,6 @@ frontend/
       ConversationPanel.jsx     # 左侧：对话流 + 输入框 + 加载测试场景
       SuggestionPanel.jsx       # 右侧：建议文本框 + 知识溯源 + 置信度 + 操作按钮
     api.js                       # 封装对后端API的调用
-IMPLEMENTATION_PLAN.txt          # 分阶段实施计划（含每步的测试方式和预期结果）
 PROMPT_ITERATION.md              # Prompt V1/V2 对比记录
 BAD_CASE_ANALYSIS.md             # 2个真实bad case分析
 ```
@@ -141,7 +140,7 @@ pytest tests/ -v
   （生成阶段实际引用了哪几条，从 Claude 输出末尾的 `[参考: faq_001, ...]` 标记解析得到），前端在FAQ卡片上
   标出"已引用"，方便客服核对建议依据。
 - **置信度**：用检索到的最高 cosine similarity 分数表示，前端映射成 高(≥70%)/中(≥50%)/低(<50%) 三档，
-  低于 0.5 时后端直接不调用 LLM，返回固定的"建议人工核实"文案（见 `generation.py` 里的短路逻辑）。
+  低于 0.5 时后端直接不调用 LLM，返回固定的"建议人工核实"文案。
 
 ## 检索准确率报告（eval.py）
 
