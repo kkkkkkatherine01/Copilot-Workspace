@@ -3,9 +3,6 @@
 生成模块（`backend/generation.py`）目前保留了两版 prompt（`PROMPT_TEMPLATE_V1` / `PROMPT_TEMPLATE_V2`），
 可通过 `generate_suggestion(..., prompt_version="v1"|"v2")` 切换，默认使用 V2。
 
-以下对比数据全部来自 `backend/generation.py` 的真实调用输出（Claude Haiku，`shibing624/text2vec-base-chinese`
-检索结果），没有人工编造或润色。
-
 > 补充说明：`generation.py` 里还有第三个 prompt——`QUERY_REWRITE_PROMPT`，用途是在检索之前把
 > 依赖上下文的追问（比如"这张券还能用吗"）改写成独立完整的问题，跟这里对比的"生成客服回复"
 > 是完全不同的用途。它只有一个版本，不存在A/B对比（改写任务本身比较机械，不像回复生成那样
